@@ -1,0 +1,18 @@
+# 安装器运行产物
+install.log
+install.log.*
+
+# 提示词配置备份（安装器在覆盖前生成）
+*.backup-*
+prompt-custom.json.backup-*
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Node
+node_modules/
+npm-debug.log*
