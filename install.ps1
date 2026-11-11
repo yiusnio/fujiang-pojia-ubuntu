@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
-  [ValidatePattern('^[A-Za-z0-9._-]+$')]
-  [string]$Profile = 'desktop',
+  # Empty means "auto-detect from $DSH_HOME" (web, desktop, or a custom profile).
+  [ValidatePattern('^[A-Za-z0-9._-]*$')]
+  [string]$Profile = '',
   [string]$DshCommand = '',
   [string]$DshHome = '',
   # Used by the double-click launcher; never prompts during a dry run.
@@ -143,6 +144,75 @@ if (-not (Test-Path -LiteralPath $sourcePlugin -PathType Container)) {
   throw 'The bundled plugin directory is missing.'
 }
 
+# --- Profile (configuration) auto-detection ---------------------------------
+# web, desktop and any custom profile all live under $DSH_HOME\profiles.
+function Test-ValidProfileName([string]$Name) {
+  return -not [string]::IsNullOrWhiteSpace($Name) -and $Name -match '^[A-Za-z0-9._-]+$'
+}
+
+function Get-ProfileNames([string]$DataHome) {
+  $root = Join-Path $DataHome 'profiles'
+  if (-not (Test-Path -LiteralPath $root -PathType Container)) { return @() }
+  # profiles\ also holds sibling folders such as node_modules; only real configs count.
+  return @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'package.json') -PathType Leaf } |
+    ForEach-Object { $_.Name })
+}
+
+function Get-ProfileFromArguments {
+  param([string[]]$Tokens)
+  $previous = ''
+  foreach ($token in @($Tokens)) {
+    if ($token -eq '--profile') { $previous = '__want__'; continue }
+    if ($token -like '--profile=*') { return $token.Substring('--profile='.Length) }
+    if ($previous -eq '__want__') { return $token }
+    if ($previous -match '(?i)(dsh(\.cmd|\.exe|\.sh|\.js)?|bin\.(js|cjs|mjs))$' -and $token -notmatch '^-') {
+      return $token
+    }
+    $previous = $token
+  }
+  return $null
+}
+
+function Get-DetectedProfile {
+  param([string]$DataHome)
+  $names = @(Get-ProfileNames $DataHome)
+  $exists = { param($name) $names -contains $name }
+
+  if (-not [string]::IsNullOrWhiteSpace($env:DSH_PROFILE)) {
+    $name = $env:DSH_PROFILE.Trim()
+    if ((Test-ValidProfileName $name) -and (& $exists $name)) { return @($name, 'DSH_PROFILE environment variable') }
+  }
+  foreach ($process in @(Get-HarnessProcesses)) {
+    $commandLine = $null
+    try { $commandLine = (Get-CimInstance Win32_Process -Filter ("ProcessId = " + $process.Id) -ErrorAction Stop).CommandLine } catch { }
+    if (-not $commandLine) { continue }
+    $name = Get-ProfileFromArguments ($commandLine -split '\s+')
+    if ((Test-ValidProfileName $name) -and (& $exists $name)) { return @($name, 'running dsh process') }
+  }
+  $processFile = Join-Path $DataHome 'dsh-process.json'
+  if (Test-Path -LiteralPath $processFile -PathType Leaf) {
+    $argv = @()
+    try { $argv = @((Get-Content -LiteralPath $processFile -Raw | ConvertFrom-Json).argv) } catch { }
+    $name = Get-ProfileFromArguments $argv
+    if ((Test-ValidProfileName $name) -and (& $exists $name)) { return @($name, 'dsh-process.json') }
+  }
+  # Installed profiles are the ones actually in use.
+  foreach ($name in $names) {
+    $dir = Join-Path (Join-Path $DataHome 'profiles') $name
+    if ((Test-Path -LiteralPath (Join-Path $dir 'node_modules') -PathType Container) -or
+        (Test-Path -LiteralPath (Join-Path $dir 'pnpm-lock.yaml') -PathType Leaf) -or
+        (Test-Path -LiteralPath (Join-Path $dir 'cordis.yml') -PathType Leaf)) {
+      return @($name, 'profile with installed dependencies')
+    }
+  }
+  if ($names.Count -eq 1) { return @($names[0], 'only configured profile') }
+  foreach ($name in @('desktop', 'web')) {
+    if (& $exists $name) { return @($name, 'default') }
+  }
+  return @('desktop', 'default')
+}
+
 if ([string]::IsNullOrWhiteSpace($DshHome)) {
   if ([string]::IsNullOrWhiteSpace($env:DSH_HOME)) {
     $targetHome = Join-Path $env:USERPROFILE '.dsh'
@@ -154,6 +224,13 @@ if ([string]::IsNullOrWhiteSpace($DshHome)) {
 }
 $targetHome = [System.IO.Path]::GetFullPath($targetHome)
 $env:DSH_HOME = $targetHome
+
+$profileSource = 'explicit -Profile'
+if ([string]::IsNullOrWhiteSpace($Profile)) {
+  $detected = Get-DetectedProfile $targetHome
+  $Profile = $detected[0]
+  $profileSource = $detected[1]
+}
 
 $dshExecutable = Find-DshExecutable -Command $DshCommand
 if (-not $dshExecutable -and $PromptForDshPath -and -not $DryRun -and [string]::IsNullOrWhiteSpace($DshCommand)) {
@@ -168,11 +245,10 @@ if (-not $dshExecutable) {
   throw '未找到 DSH 命令行工具。可运行 .\install.ps1 -DshCommand "D:\应用\DeepSeek Harness"（替换为实际安装目录或 dsh.cmd 路径）。若数据目录也已移动，另传 -DshHome "D:\数据\.dsh"；请勿将程序安装目录当作数据目录。'
 }
 
-if ($Profile -eq 'desktop') {
-  $desktopProfile = Join-Path $targetHome 'profiles\desktop'
-  if (-not (Test-Path -LiteralPath (Join-Path $desktopProfile 'package.json') -PathType Leaf)) {
-    throw ('未找到 Desktop 配置：' + $desktopProfile + '。请先启动一次 DeepSeek Harness Desktop；若数据目录已移动，请使用 -DshHome 指定 .dsh 数据目录（不是程序安装目录）。')
-  }
+if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $targetHome 'profiles') ($Profile + '\package.json')) -PathType Leaf)) {
+  $available = @(Get-ProfileNames $targetHome)
+  $detail = if ($available.Count) { '这个数据目录里可用的配置：' + ($available -join '、') + '。请用 -Profile <名称> 指定。' } else { '这个数据目录里还没有任何配置，请先启动一次 DeepSeek Harness 完成初始化。' }
+  throw ('未找到配置 “' + $Profile + '”：' + (Join-Path $targetHome ('profiles\' + $Profile)) + '。' + $detail + '若数据目录已移动，请使用 -DshHome 指定 .dsh 数据目录（不是程序安装目录）。')
 }
 
 $pluginTarget = Join-Path $targetHome 'local-plugins\dsh-prompt-custom'
@@ -182,6 +258,7 @@ $harnessProcesses = Get-HarnessProcesses
 if ($DryRun) {
   Write-Step 'Dry run; nothing will change.'
   Write-Step ('bundle    : ' + $bundleRoot)
+  Write-Step ('profile   : ' + $Profile + ' (from: ' + $profileSource + ')')
   Write-Step ('plugin to : ' + $pluginTarget)
   Write-Step ('prompt to : ' + $promptTarget)
   Write-Step ('dsh cli   : ' + $dshExecutable)
@@ -224,6 +301,7 @@ if ($sourceHash -and -not $targetMatches) {
 }
 Write-Step ('文件已复制到 ' + $pluginTarget)
 
+Write-Step ('注册到配置：' + $Profile + '（来源：' + $profileSource + '）')
 try {
   & $dshExecutable plugin --profile $Profile add $pluginTarget
   $installExitCode = $LASTEXITCODE

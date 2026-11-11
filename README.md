@@ -14,7 +14,7 @@
 
 在仓库页面点击 **Code → Download ZIP**（代码 → 下载压缩包），解压后安装；也可以使用 Git 克隆本仓库。
 
-1. 先启动一次官方 DeepSeek Harness Desktop，完成 `desktop` 配置初始化。
+1. 先启动一次官方 DeepSeek Harness，完成你要用的配置初始化（`web` 或 `desktop`）。
 2. 完全退出 Harness，包括右下角托盘图标中的“退出”。
 3. 双击解压目录中的 **`点我执行脚本.cmd`**。
 4. 安装完成后自行重新打开 Harness。
@@ -29,7 +29,7 @@
 .\install.ps1 -DryRun
 ```
 
-安装器默认使用 `desktop` 配置，会从运行路径、默认安装位置、注册表和开始菜单或桌面快捷方式查找 Desktop 自带的 DSH 命令行工具，再尝试系统 PATH，支持安装到 D、E 等其他盘符。双击安装脚本仍未找到时，可按提示粘贴实际安装文件夹或可执行文件路径。
+安装器默认自动识别你正在使用的配置（`web`、`desktop` 或自定义配置），会从运行路径、默认安装位置、注册表和开始菜单或桌面快捷方式查找 DSH 命令行工具，再尝试系统 PATH，支持安装到 D、E 等其他盘符。双击安装脚本仍未找到时，可按提示粘贴实际安装文件夹或可执行文件路径。
 
 也可以手动指定安装目录；程序目录与 `.dsh` 数据目录是两个不同位置：
 
@@ -44,7 +44,7 @@
 .\install.ps1 -DryRun -DshCommand "D:\应用\DeepSeek Harness"
 ```
 
-`-DshCommand` 也接受 `DeepSeek Harness.exe` 或 `dsh.cmd` 的完整路径；`-Profile` 可指定配置名称，未传 `-DshHome` 时继续遵循已有的 `DSH_HOME` 设置。
+`-DshCommand` 也接受 `DeepSeek Harness.exe` 或 `dsh.cmd` 的完整路径；`-Profile` 可指定配置名称，不传时自动识别（见「安装到哪个配置」），未传 `-DshHome` 时继续遵循已有的 `DSH_HOME` 设置。
 
 安装时，脚本将插件复制到 `$DSH_HOME\local-plugins\dsh-prompt-custom`，通过 `dsh plugin --profile <profile> add <path>` 注册，并将附带的提示词配置复制到 `$DSH_HOME\prompt-custom.json`。如果已有配置与新配置不同，会先在原文件旁备份；注册失败且存在备份时，会恢复原提示词配置。未设置 `DSH_HOME` 时，默认使用 `$env:USERPROFILE\.dsh`。
 
@@ -70,32 +70,58 @@ Get-ChildItem -LiteralPath .\plugin -Force | ForEach-Object {
   Copy-Item -LiteralPath $_.FullName -Destination $pluginTarget -Recurse -Force
 }
 
-# 使用 Desktop 自带的命令行工具注册插件
-& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add $pluginTarget
+# 使用 Desktop 自带的命令行工具注册插件（把 web 换成你实际在用的配置名）
+& "$env:LOCALAPPDATA\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile web add $pluginTarget
 ```
 
 手动安装如需采用附带的 `prompt-custom.json`，请先备份已有同名配置，再将其复制到 `$env:USERPROFILE\.dsh\prompt-custom.json`。完成后自行启动 Harness。
+
+## 安装到哪个配置（profile）
+
+DSH 把每套配置放在 `$DSH_HOME/profiles/<名称>` 下，常见的是 `web`（浏览器界面，`dsh web`）和 `desktop`（桌面端，`dsh desktop`），也可以是任何自定义名称。插件必须注册到**你实际在用的那一个**，否则界面上不会出现富江破甲入口。
+
+安装器不再写死 `desktop`，默认按下面的顺序自动判断：
+
+| 顺序 | 依据 | 说明 |
+| --- | --- | --- |
+| 1 | `--profile` / `-Profile` | 显式指定，优先级最高。 |
+| 2 | `DSH_PROFILE` 环境变量 | 在 `dsh` 启动的 shell 里会自动带上。 |
+| 3 | 正在运行的 dsh 进程 | 从进程命令行里读 `--profile <名称>` 或 `dsh <名称> ...`。 |
+| 4 | `$DSH_HOME/dsh-process.json` | dsh 每次启动都会写，记录里含 `argv` 与 `commandLine`。 |
+| 5 | 装过依赖的配置 | `profiles/<名称>` 下存在 `node_modules`、`pnpm-lock.yaml` 或 `cordis.yml`。 |
+| 6 | 最近修改的配置 | 上面都没命中时按目录修改时间取最新。 |
+| 7 | 唯一的配置 / `desktop`、`web` | 只有一个配置就直接用；否则依次找存在的 `desktop`、`web`。 |
+
+判断出的配置名会在安装时打印出来并注明来源，例如：
+
+```
+[dsh-prompt-custom] profile   : web（来自：dsh-process.json）
+```
+
+想确认会装到哪里，用 `install.ps1 -DryRun` 或 `install.sh --dry-run` 看一眼即可，不会改动文件。指定的配置不存在时，安装器会停止并列出该数据目录里实际可用的配置名。
+
+> 注意：`profiles/` 目录下还可能有 `node_modules` 这样的平级目录，它们不是配置，安装器只认含 `package.json` 的目录。
 
 ## Linux / Ubuntu 安装
 
 同一份仓库同时提供 Windows 与 Linux 安装器，插件程序本身是跨平台的，不需要为 Ubuntu 单独准备一份插件。Windows 用户继续用 `install.ps1` / `点我执行脚本.cmd`，Ubuntu 用户用 `install.sh` / `点我执行脚本.sh`。
 
-1. 先启动一次官方 DeepSeek Harness，完成 `desktop` 配置初始化。
+1. 先启动一次官方 DeepSeek Harness（用哪个界面就启动哪个，`web` 或 `desktop`），完成对应配置初始化。
 2. **完全退出 Harness**（不要只关窗口，确认进程已退出）。
 3. 在解压目录中执行安装脚本。
 
 ```bash
-# 完全退出 Harness 后执行安装
+# 完全退出 Harness 后执行安装（自动识别配置）
 bash ./install.sh
 
 # 或者使用入口脚本（自动切换工作目录并透传参数）
 ./点我执行脚本.sh
 
-# 仅查看安装计划，不修改任何文件
+# 仅查看安装计划，不修改任何文件（会显示识别到的配置名与来源）
 bash ./install.sh --dry-run
 
-# 指定配置名称与数据目录
-bash ./install.sh --profile desktop --dsh-home ~/.local/share/dsh
+# 明确指定配置名称与数据目录
+bash ./install.sh --profile web --dsh-home ~/.local/share/dsh
 ```
 
 确认 Harness 是否已经退出：
@@ -108,7 +134,7 @@ pgrep -f -i 'DeepSeek[ _-]*Harness'   # 有输出说明仍在运行，安装器�
 
 | 参数 | 说明 |
 | --- | --- |
-| `-p, --profile <name>` | 配置名称，默认 `desktop`。 |
+| `-p, --profile <name>` | 配置名称。不传时自动识别（见「安装到哪个配置」）。 |
 | `-c, --dsh-command <path>` | 手动指定 DSH 命令行工具或 Harness 安装目录，支持中文与空格；也可指向 Harness 可执行文件，脚本会回退到同级 `resources/runtime/cli/bin/dsh`。 |
 | `--dsh-home <dir>` | 手动指定数据目录，默认 `$DSH_HOME`，未设置时为 `~/.dsh`。 |
 | `--prompt-from <file>` | 使用其他位置的提示词配置，而不是仓库自带的 `prompt-custom.json`。 |
@@ -120,7 +146,7 @@ pgrep -f -i 'DeepSeek[ _-]*Harness'   # 有输出说明仍在运行，安装器�
 
 脚本会从 `~/.local/share/DeepSeek Harness`、`/opt/DeepSeek Harness`、`/opt/deepseek-harness`、`/opt/dsh`、`/snap/deepseek-harness/current` 等位置查找安装目录，也会解析正在运行的进程和 `.desktop` 文件里的启动路径，最后回退到系统 `PATH`。找到目录后自动使用其中的 `resources/runtime/cli/bin/dsh`。
 
-安装流程与 Windows 版一致：把 `plugin/` 复制到 `$DSH_HOME/local-plugins/dsh-prompt-custom`，通过 `dsh plugin --profile <profile> add <path>` 注册，并把提示词配置写到 `$DSH_HOME/prompt-custom.json`。已有配置不同时会先备份为 `prompt-custom.json.backup-<时间戳>`；若后续注册失败，脚本会自动还原提示词备份。运行记录写入同目录的 `install.log`。
+安装流程与 Windows 版一致：先确定要装到哪个配置（不传 `--profile` 时自动识别，见「安装到哪个配置」），把 `plugin/` 复制到 `$DSH_HOME/local-plugins/dsh-prompt-custom`，通过 `dsh plugin --profile <profile> add <path>` 注册，并把提示词配置写到 `$DSH_HOME/prompt-custom.json`。已有配置不同时会先备份为 `prompt-custom.json.backup-<时间戳>`；若后续注册失败，脚本会自动还原提示词备份。运行记录写入同目录的 `install.log`。
 
 > Ubuntu 上多数发行版把 Harness 装在用户目录下，`dsh` 命令行不在 `PATH` 里。安装器会自己解析路径，通常无需手动指定；只有在自定义位置安装时才需要 `--dsh-command`。
 
@@ -260,15 +286,19 @@ bash tests/run-all-linux.sh /path/to/AboutSecurity.zip
 
 | 测试 | 覆盖内容 | 断言数 |
 | --- | --- | --- |
-| `tests/install-paths.sh` | 安装器：中文与空格路径解析、dry-run、未知参数拒绝、提示词备份与失败还原、复制内容与 `dsh plugin add` 参数 | 18 |
+| `tests/install-paths.sh` | 安装器：中文与空格路径解析、dry-run、未知参数拒绝、提示词备份与失败还原、复制内容与 `dsh plugin add` 参数；配置自动识别的全部分支（命令行、`DSH_PROFILE`、进程、`dsh-process.json`、依赖线索、路径注入拒绝、配置缺失报错） | 32 |
 | `tests/linux-runtime.mjs` | ZIP 解析器（store/deflate、UTF-8 名、权限位、路径逃逸拒绝）、REA 版本门槛边界值、Node 与 npm 定位 | 23 |
 | `tests/aboutsecurity-extractors.mjs` | 解压降级链的控制流：unzip 与 python3 的嵌套路径归位、不完整解压被拒绝并继续降级、全失败时的报错内容与残留清理 | 21 |
 | `tests/aboutsecurity-extract.mjs` | 真实压缩包端到端：先打印系统 `tar` 读取失败的原始报错，再用插件真实代码路径（伪造 HTTP 流）完整跑一次安装 | 16 |
 | `tests/aboutsecurity-real-extract.mjs` | 真实系统命令：分别禁用部分后端，验证 `python3` 与内置解析器都能完成解压并正确归位 | 14 |
 
-合计 92 项断言。
+合计 106 项断言。
 
-Windows 相关测试见 `tests/install-paths.ps1` 与 `tests/keyboard-*.mjs`。
+Windows 相关测试见 `tests/install-paths.ps1`（28 项，含配置自动识别的对应分支）与 `tests/keyboard-*.mjs`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\install-paths.ps1
+```
 
 ## 提示词配置与免责声明
 

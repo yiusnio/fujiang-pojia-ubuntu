@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.20.13-linux.2（2026-11-11）
+
+安装器不再默认 `desktop`，改为自动识别你实际在用的配置。原来固定注册到 `desktop`，用 `dsh web`（或任何自定义配置）的用户装完看不到入口。
+
+- Windows（`install.ps1`）与 Linux（`install.sh`）安装器的配置判定顺序统一为：`--profile` 显式指定 → `DSH_PROFILE` 环境变量 → 正在运行的 dsh 进程命令行 → `$DSH_HOME/dsh-process.json` 的 `argv`/`commandLine` → 装过依赖的配置（含 `node_modules` / `pnpm-lock.yaml` / `cordis.yml`）→ 最近修改的配置 → 唯一存在的配置，最后才兜底 `desktop`、`web`。
+- `dsh-process.json` 是 dsh 每次启动都会写的记录，其中的启动参数直接带有配置名，作为离线判据最可靠。例如本机的 `"bin.js web --no-open"` 会识别为 `web`。
+- 安装前会打印识别结果与来源（如 `profile   : web（来自：dsh-process.json）`），`--dry-run` / `-DryRun` 同样输出，便于确认装到哪里。
+- 配置名增加白名单校验 `^[A-Za-z0-9._-]+$`，阻止 `../` 之类的路径注入；指定的配置不存在时停止并列出该数据目录下实际可用的配置名。
+- `profiles/` 下与配置平级的 `node_modules` 之类的目录不会被误当成配置——只认含 `package.json` 的目录。
+- 测试同步扩充：Linux 侧 `tests/install-paths.sh` 32 项、Windows 侧 `tests/install-paths.ps1` 28 项，覆盖上述全部判定分支与拒绝分支。
+
 ## 0.20.13-linux.1（2026-11-11）
 
 Ubuntu / Linux 移植版。插件程序与 Windows 版共用，新增 Linux 安装器并修掉两个只在 Linux 上暴露的问题。

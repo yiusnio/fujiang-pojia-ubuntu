@@ -98,13 +98,89 @@ if bash "$INSTALLER" --bogus >/dev/null 2>&1; then
 else
   assert_eq "rejected" "rejected" "未知参数被拒绝"; fi
 
-# 10) 缺少 desktop 配置时报错
+# 9b) 配置名解析：--profile <name> / --profile=<name> / dsh <name> --no-open
+assert_eq "$(profile_from_words --profile web)" "web" "解析 --profile web"
+assert_eq "$(profile_from_words --profile=web)" "web" "解析 --profile=web"
+assert_eq "$(profile_from_words /path/to/bin.js web --no-open)" "web" "解析 bin.js 后的配置名"
+assert_eq "$(profile_from_words node /usr/lib/dsh/bin.js headless "run the tests")" "headless" "解析 headless 配置（参数里的空格不影响）"
+assert_eq "$(profile_from_words --dump-config)" "" "没有配置名时返回空"
+
+# 9c) 配置自动识别优先级
+PROBE_HOME="$FIXTURE/probe-home/.dsh"
+mkdir -p "$PROBE_HOME/profiles/web/node_modules" "$PROBE_HOME/profiles/desktop"
+printf '{"name":"web"}\n' > "$PROBE_HOME/profiles/web/package.json"
+printf '{"name":"desktop"}\n' > "$PROBE_HOME/profiles/desktop/package.json"
+DETECTED="$(DSH_HOME="$PROBE_HOME" bash -c '
+  set -euo pipefail
+  FUJIANG_INSTALL_SOURCE_ONLY=1 . "'"$INSTALLER"'"
+  unset DSH_PROFILE
+  detect_profile
+  printf "%s|%s\n" "$PROFILE" "$PROFILE_SOURCE"
+')"
+assert_eq "$DETECTED" "web|已安装依赖的配置" "装有 node_modules 的配置优先于平级的 desktop"
+
+# 9d) 显式 --profile 压过自动识别（先加载再赋值，模拟参数解析完成后的状态）
+DETECTED="$(DSH_HOME="$PROBE_HOME" bash -c '
+  set -euo pipefail
+  FUJIANG_INSTALL_SOURCE_ONLY=1 . "'"$INSTALLER"'"
+  PROFILE="desktop"
+  detect_profile
+  printf "%s|%s\n" "$PROFILE" "$PROFILE_SOURCE"
+')"
+assert_eq "$DETECTED" "desktop|--profile" "显式指定的配置不被自动识别覆盖"
+
+# 9e) 读 dsh-process.json 的 argv（dsh web --no-open）
+PROC_HOME="$FIXTURE/proc-home/.dsh"
+mkdir -p "$PROC_HOME/profiles/web" "$PROC_HOME/profiles/desktop/node_modules"
+printf '{"name":"web"}\n' > "$PROC_HOME/profiles/web/package.json"
+printf '{"name":"desktop"}\n' > "$PROC_HOME/profiles/desktop/package.json"
+cat > "$PROC_HOME/dsh-process.json" <<'PROCJSON'
+{
+  "pid": 31356,
+  "argv": [
+    "C:\\Users\\x\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js",
+    "web",
+    "--no-open"
+  ],
+  "startedAt": "2026-10-11T08:14:51.365Z"
+}
+PROCJSON
+DETECTED="$(DSH_HOME="$PROC_HOME" bash -c '
+  set -euo pipefail
+  FUJIANG_INSTALL_SOURCE_ONLY=1 . "'"$INSTALLER"'"
+  unset DSH_PROFILE
+  detect_profile
+  printf "%s|%s\n" "$PROFILE" "$PROFILE_SOURCE"
+')"
+assert_eq "$DETECTED" "web|dsh-process.json" "dsh-process.json 里的启动配置优先于依赖线索"
+
+# 9f) DSH_PROFILE 环境变量最优先
+DETECTED="$(DSH_HOME="$PROC_HOME" DSH_PROFILE=desktop bash -c '
+  set -euo pipefail
+  FUJIANG_INSTALL_SOURCE_ONLY=1 . "'"$INSTALLER"'"
+  detect_profile
+  printf "%s\n" "$PROFILE"
+')"
+assert_eq "$DETECTED" "desktop" "DSH_PROFILE 环境变量被采纳"
+
+# 9g) 配置名不合法（路径注入）时不被采纳
+assert_eq "$(bash -c 'FUJIANG_INSTALL_SOURCE_ONLY=1 . "'"$INSTALLER"'"; valid_profile_name "../../etc" && echo ok || echo rejected')" "rejected" "拒绝含路径分隔符的配置名"
+
+# 10) 缺少配置时报错，并列出可用的配置
 EMPTY_HOME="$FIXTURE/empty-home"
 mkdir -p "$EMPTY_HOME"
-if HOME="$FIXTURE/home" DSH_HOME="$EMPTY_HOME" bash "$INSTALLER" --dsh-command "$CLI_DIR/dsh" >/dev/null 2>&1; then
-  assert_eq "proceeded" "stopped" "缺少 desktop 配置时停止"
-else
-  assert_eq "stopped" "stopped" "缺少 desktop 配置时停止"; fi
+MISSING_OUT="$(HOME="$FIXTURE/home" DSH_HOME="$EMPTY_HOME" bash "$INSTALLER" --dsh-command "$CLI_DIR/dsh" 2>&1)" && MISSING_RC=0 || MISSING_RC=$?
+assert_eq "$MISSING_RC" "1" "缺少配置时停止"
+assert_contains "$MISSING_OUT" "还没有任何配置" "空数据目录给出初始化提示"
+
+# 10b) 指定的配置不存在时，报错里要带上可用配置清单
+WRONG_HOME="$FIXTURE/wrong/.dsh"
+mkdir -p "$WRONG_HOME/profiles/web"
+printf '{"name":"web"}\n' > "$WRONG_HOME/profiles/web/package.json"
+WRONG_OUT="$(HOME="$FIXTURE/wrong" DSH_HOME="$WRONG_HOME" bash "$INSTALLER" --dsh-command "$CLI_DIR/dsh" --profile tui 2>&1)" && WRONG_RC=0 || WRONG_RC=$?
+assert_eq "$WRONG_RC" "1" "配置不存在时停止"
+assert_contains "$WRONG_OUT" "tui" "报错包含请求的配置名"
+assert_contains "$WRONG_OUT" "web" "报错列出可用的配置"
 
 # 11) --keep-prompt 不覆盖已有提示词
 KEEP_HOME="$FIXTURE/keep/.dsh"

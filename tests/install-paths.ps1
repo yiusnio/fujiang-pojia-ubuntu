@@ -5,7 +5,7 @@ $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($installer, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-foreach ($name in @('Get-HarnessProcesses', 'Resolve-DshCandidate', 'Get-HarnessInstallLocations', 'Find-DshExecutable')) {
+foreach ($name in @('Get-HarnessProcesses', 'Resolve-DshCandidate', 'Get-HarnessInstallLocations', 'Find-DshExecutable', 'Test-ValidProfileName', 'Get-ProfileNames', 'Get-ProfileFromArguments', 'Get-DetectedProfile')) {
   $functionAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
   if (-not $functionAst) { throw "Missing function: $name" }
   . ([scriptblock]::Create($functionAst.Extent.Text))
@@ -13,7 +13,10 @@ foreach ($name in @('Get-HarnessProcesses', 'Resolve-DshCandidate', 'Get-Harness
 $realLocations = ${function:Get-HarnessInstallLocations}
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('fujiang-install-test-' + [guid]::NewGuid().ToString('N'))
 $oldDshHome = $env:DSH_HOME
+$oldDshProfile = $env:DSH_PROFILE
 $oldPath = $env:PATH
+# A DSH_PROFILE exported by the surrounding tooling would override every fixture.
+$env:DSH_PROFILE = $null
 $testCount = 0
 function Assert-Equal($Actual, $Expected, [string]$Message) {
   if ($Actual -ne $Expected) { throw "$Message : expected [$Expected], got [$Actual]" }
@@ -96,6 +99,9 @@ try {
   [void][IO.Directory]::CreateDirectory((Join-Path $bundle 'plugin'))
   Copy-Item -LiteralPath $installer -Destination (Join-Path $bundle 'install.ps1')
   [IO.File]::WriteAllText((Join-Path $bundle 'plugin\package.json'), '{"name":"test-only-plugin","version":"0.0.0"}')
+  # The requested profile has to exist; dsh is not asked to seed a brand-new one here.
+  [void][IO.Directory]::CreateDirectory((Join-Path $dataRoot 'profiles\test'))
+  [IO.File]::WriteAllText((Join-Path $dataRoot 'profiles\test\package.json'), '{}')
   $invocationLog = Join-Path $fixture 'cli-arguments.txt'
   $fakeCli = Join-Path $fixture 'fake-dsh.ps1'
   [IO.File]::WriteAllText($fakeCli, ('$args | Set-Content -LiteralPath ''' + $invocationLog.Replace("'", "''") + ''' -Encoding UTF8' + "`r`n" + '$global:LASTEXITCODE = 0'))
@@ -110,9 +116,44 @@ try {
   $cliArguments = @(Get-Content -LiteralPath $invocationLog -Encoding UTF8)
   Assert-Equal ($cliArguments -join '|') ('plugin|--profile|test|add|' + (Join-Path $dataRoot 'local-plugins\dsh-prompt-custom')) 'isolated install passes custom data path as one argument'
   Assert-Equal (Test-Path -LiteralPath (Join-Path $dataRoot 'local-plugins\dsh-prompt-custom\package.json')) $true 'isolated install copies only fixture plugin'
+
+  # Profile auto-detection: a web profile must win over a bare desktop folder.
+  $autoRoot = Join-Path $fixture 'auto-profile\.dsh'
+  $webDir = Join-Path $autoRoot 'profiles\web'
+  $deskDir = Join-Path $autoRoot 'profiles\desktop'
+  [void][IO.Directory]::CreateDirectory((Join-Path $webDir 'node_modules'))
+  [void][IO.Directory]::CreateDirectory($deskDir)
+  [IO.File]::WriteAllText((Join-Path $webDir 'package.json'), '{"name":"dsh-profile-web"}')
+  [IO.File]::WriteAllText((Join-Path $deskDir 'package.json'), '{"name":"dsh-profile-desktop"}')
+  Assert-Equal ((@(Get-DetectedProfile $autoRoot)) -join '|') 'web|profile with installed dependencies' 'installed web profile wins over bare desktop folder'
+
+  # dsh-process.json records the profile actually launched.
+  $procRoot = Join-Path $fixture 'proc-profile\.dsh'
+  [void][IO.Directory]::CreateDirectory((Join-Path $procRoot 'profiles\web'))
+  [void][IO.Directory]::CreateDirectory((Join-Path $procRoot 'profiles\desktop\node_modules'))
+  [IO.File]::WriteAllText((Join-Path $procRoot 'profiles\web\package.json'), '{"name":"dsh-profile-web"}')
+  [IO.File]::WriteAllText((Join-Path $procRoot 'profiles\desktop\package.json'), '{"name":"dsh-profile-desktop"}')
+  [IO.File]::WriteAllText((Join-Path $procRoot 'dsh-process.json'), '{"pid":31356,"argv":["C:\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js","web","--no-open"]}')
+  Assert-Equal ((@(Get-DetectedProfile $procRoot)) -join '|') 'web|dsh-process.json' 'dsh-process.json argv beats the installed-dependency hint'
+  Assert-Equal (Get-ProfileFromArguments @('--profile', 'tui')) 'tui' 'explicit --profile pair'
+  Assert-Equal (Get-ProfileFromArguments @('--profile=headless')) 'headless' 'explicit --profile=value form'
+  Assert-Equal (Get-ProfileFromArguments @('--dump-config')) $null 'no profile token yields null'
+  Assert-Equal (Test-ValidProfileName '../../etc') $false 'path traversal in a profile name is rejected'
+
+  # DSH_PROFILE wins over everything except an explicit -Profile.
+  $env:DSH_PROFILE = 'desktop'
+  Assert-Equal ((@(Get-DetectedProfile $procRoot)) -join '|') 'desktop|DSH_PROFILE environment variable' 'DSH_PROFILE environment variable is honored'
+  $env:DSH_PROFILE = $null
+
+  # An unknown profile fails with the list of available ones.
+  $profileFailure = ''
+  try { & $installer -Profile tui -DshCommand $installRoot -DshHome $autoRoot } catch { $profileFailure = $_.Exception.Message }
+  Assert-Equal ($profileFailure.Contains('tui') -and $profileFailure.Contains('web')) $true 'missing profile reports the requested name and available ones'
+
   Write-Host "Passed $testCount installer path checks on PowerShell $($PSVersionTable.PSVersion)."
 } finally {
   $env:DSH_HOME = $oldDshHome
+  $env:DSH_PROFILE = $oldDshProfile
   $env:PATH = $oldPath
   $resolvedFixture = [IO.Path]::GetFullPath($fixture)
   $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
